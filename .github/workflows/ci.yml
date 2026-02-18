@@ -11,6 +11,9 @@ permissions:
   contents: read
   security-events: write
   packages: write
+  actions: read
+  checks: write
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,8 +35,19 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Build & Test
+      - name: Build & Test with Coverage
         run: mvn clean install -B
+
+      - name: Generate JaCoCo coverage report
+        run: mvn jacoco:report -B -q
+
+      - name: Run SpotBugs analysis
+        continue-on-error: true
+        run: mvn spotbugs:spotbugs -B -q
+
+      - name: Run PMD analysis
+        continue-on-error: true
+        run: mvn pmd:pmd pmd:cpd -B -q
 
       - name: Upload test reports
         if: always()
@@ -41,6 +55,27 @@ jobs:
         with:
           name: test-reports
           path: target/surefire-reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/site/jacoco/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload static analysis reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-reports
+          path: |
+            target/spotbugs/
+            target/pmd.xml
+            target/cpd.xml
           if-no-files-found: ignore
           retention-days: 7
 
@@ -172,10 +207,706 @@ jobs:
         with:
           sarif_file: 'trivy-image-results.sarif'
 
+  # ─────────────────────────────────────────────────────────────
+  # AI-Driven Code Quality Analysis
+  # Uses OpenAI GPT to analyze static analysis findings, coverage
+  # gaps, and code patterns, then posts an AI summary as a PR comment
+  # or job summary.
+  # ─────────────────────────────────────────────────────────────
+  ai-code-quality:
+    name: AI Code Quality Analysis
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: always() && needs.build-and-test.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report/
+        continue-on-error: true
+
+      - name: Download static analysis reports
+        uses: actions/download-artifact@v4
+        with:
+          name: static-analysis-reports
+          path: static-analysis/
+        continue-on-error: true
+
+      - name: Download test reports
+        uses: actions/download-artifact@v4
+        with:
+          name: test-reports
+          path: test-reports/
+        continue-on-error: true
+
+      - name: Collect code metrics
+        id: metrics
+        run: |
+          echo "## 📊 Code Metrics Collection" >> $GITHUB_STEP_SUMMARY
+
+          # --- JaCoCo coverage parsing ---
+          JACOCO_CSV="coverage-report/jacoco.csv"
+          if [ -f "$JACOCO_CSV" ]; then
+            TOTAL_MISSED=0; TOTAL_COVERED=0
+            while IFS=',' read -r group pkg class im ic bm bc lm lc cm cc mm mc; do
+              if [ "$group" != "GROUP" ]; then
+                TOTAL_MISSED=$((TOTAL_MISSED + lm))
+                TOTAL_COVERED=$((TOTAL_COVERED + lc))
+              fi
+            done < "$JACOCO_CSV"
+            TOTAL=$((TOTAL_MISSED + TOTAL_COVERED))
+            if [ "$TOTAL" -gt 0 ]; then
+              COVERAGE=$(( (TOTAL_COVERED * 100) / TOTAL ))
+            else
+              COVERAGE=0
+            fi
+            echo "line_coverage=${COVERAGE}" >> $GITHUB_OUTPUT
+            echo "lines_covered=${TOTAL_COVERED}" >> $GITHUB_OUTPUT
+            echo "lines_missed=${TOTAL_MISSED}" >> $GITHUB_OUTPUT
+            echo "✅ Line coverage: **${COVERAGE}%** (${TOTAL_COVERED}/${TOTAL})" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "line_coverage=N/A" >> $GITHUB_OUTPUT
+            echo "⚠️ No JaCoCo coverage data found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # --- SpotBugs parsing ---
+          SPOTBUGS_XML="static-analysis/spotbugs/spotbugsXml.xml"
+          if [ -f "$SPOTBUGS_XML" ]; then
+            BUG_COUNT=$(grep -c '<BugInstance' "$SPOTBUGS_XML" 2>/dev/null || echo "0")
+            echo "spotbugs_count=${BUG_COUNT}" >> $GITHUB_OUTPUT
+            echo "🐛 SpotBugs issues: **${BUG_COUNT}**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "spotbugs_count=0" >> $GITHUB_OUTPUT
+            echo "ℹ️ No SpotBugs report found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # --- PMD parsing ---
+          PMD_XML="static-analysis/pmd.xml"
+          if [ -f "$PMD_XML" ]; then
+            PMD_COUNT=$(grep -c '<violation' "$PMD_XML" 2>/dev/null || echo "0")
+            echo "pmd_count=${PMD_COUNT}" >> $GITHUB_OUTPUT
+            echo "⚡ PMD violations: **${PMD_COUNT}**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "pmd_count=0" >> $GITHUB_OUTPUT
+            echo "ℹ️ No PMD report found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # --- CPD (copy-paste detection) ---
+          CPD_XML="static-analysis/cpd.xml"
+          if [ -f "$CPD_XML" ]; then
+            CPD_COUNT=$(grep -c '<duplication' "$CPD_XML" 2>/dev/null || echo "0")
+            echo "cpd_count=${CPD_COUNT}" >> $GITHUB_OUTPUT
+            echo "📋 Code duplications: **${CPD_COUNT}**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "cpd_count=0" >> $GITHUB_OUTPUT
+          fi
+
+          # --- Test results summary ---
+          TESTS_RUN=0; TESTS_FAIL=0; TESTS_ERR=0; TESTS_SKIP=0
+          for f in test-reports/TEST-*.xml; do
+            [ -f "$f" ] || continue
+            TESTS_RUN=$((TESTS_RUN + $(grep -oP 'tests="\K[0-9]+' "$f" | head -1 || echo 0)))
+            TESTS_FAIL=$((TESTS_FAIL + $(grep -oP 'failures="\K[0-9]+' "$f" | head -1 || echo 0)))
+            TESTS_ERR=$((TESTS_ERR + $(grep -oP 'errors="\K[0-9]+' "$f" | head -1 || echo 0)))
+            TESTS_SKIP=$((TESTS_SKIP + $(grep -oP 'skipped="\K[0-9]+' "$f" | head -1 || echo 0)))
+          done
+          echo "tests_run=${TESTS_RUN}" >> $GITHUB_OUTPUT
+          echo "tests_failed=$((TESTS_FAIL + TESTS_ERR))" >> $GITHUB_OUTPUT
+          echo "tests_skipped=${TESTS_SKIP}" >> $GITHUB_OUTPUT
+          echo "🧪 Tests: **${TESTS_RUN}** run, **$((TESTS_FAIL + TESTS_ERR))** failed, **${TESTS_SKIP}** skipped" >> $GITHUB_STEP_SUMMARY
+
+      - name: Identify changed files
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} -- '*.java' | head -50)
+          else
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- '*.java' 2>/dev/null | head -50)
+          fi
+          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: AI Code Quality Review
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LINE_COVERAGE: ${{ steps.metrics.outputs.line_coverage }}
+          LINES_COVERED: ${{ steps.metrics.outputs.lines_covered }}
+          LINES_MISSED: ${{ steps.metrics.outputs.lines_missed }}
+          SPOTBUGS_COUNT: ${{ steps.metrics.outputs.spotbugs_count }}
+          PMD_COUNT: ${{ steps.metrics.outputs.pmd_count }}
+          CPD_COUNT: ${{ steps.metrics.outputs.cpd_count }}
+          TESTS_RUN: ${{ steps.metrics.outputs.tests_run }}
+          TESTS_FAILED: ${{ steps.metrics.outputs.tests_failed }}
+          CHANGED_FILES: ${{ steps.changes.outputs.changed_files }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            // --- Gather SpotBugs details ---
+            let spotbugsDetails = '';
+            try {
+              const xml = fs.readFileSync('static-analysis/spotbugs/spotbugsXml.xml', 'utf8');
+              const bugs = xml.match(/<BugInstance[\s\S]*?<\/BugInstance>/g) || [];
+              spotbugsDetails = bugs.slice(0, 15).map(b => {
+                const type = b.match(/type="([^"]+)"/)?.[1] || 'unknown';
+                const cat = b.match(/category="([^"]+)"/)?.[1] || '';
+                const cls = b.match(/classname="([^"]+)"/)?.[1] || '';
+                const line = b.match(/startLine="([^"]+)"/)?.[1] || '?';
+                return `- ${type} (${cat}) in ${cls}:${line}`;
+              }).join('\n');
+            } catch(e) { spotbugsDetails = 'No SpotBugs data'; }
+
+            // --- Gather PMD details ---
+            let pmdDetails = '';
+            try {
+              const xml = fs.readFileSync('static-analysis/pmd.xml', 'utf8');
+              const violations = xml.match(/<violation[\s\S]*?<\/violation>/g) || [];
+              pmdDetails = violations.slice(0, 15).map(v => {
+                const rule = v.match(/rule="([^"]+)"/)?.[1] || 'unknown';
+                const file = v.match(/name="[^"]*\/([^"\/]+\.java)"/)?.[1] || '';
+                const line = v.match(/beginline="([^"]+)"/)?.[1] || '?';
+                const msg = v.replace(/<[^>]+>/g, '').trim().substring(0, 120);
+                return `- [${rule}] ${file}:${line} — ${msg}`;
+              }).join('\n');
+            } catch(e) { pmdDetails = 'No PMD data'; }
+
+            // --- Gather coverage per-class breakdown ---
+            let coverageBreakdown = '';
+            try {
+              const csv = fs.readFileSync('coverage-report/jacoco.csv', 'utf8');
+              const lines = csv.trim().split('\n').slice(1);
+              const lowCoverage = lines.map(l => {
+                const cols = l.split(',');
+                const cls = cols[2];
+                const missed = parseInt(cols[7]) || 0;
+                const covered = parseInt(cols[8]) || 0;
+                const total = missed + covered;
+                const pct = total > 0 ? Math.round((covered * 100) / total) : 0;
+                return { cls, pct, missed, total };
+              }).filter(c => c.pct < 80 && c.total > 0)
+                .sort((a,b) => a.pct - b.pct)
+                .slice(0, 10)
+                .map(c => `- ${c.cls}: ${c.pct}% (${c.missed} lines uncovered)`)
+                .join('\n');
+              coverageBreakdown = lowCoverage || 'All classes above 80% coverage';
+            } catch(e) { coverageBreakdown = 'No coverage data'; }
+
+            // --- Read changed source files ---
+            let changedCode = '';
+            const changedFiles = process.env.CHANGED_FILES?.split('\n').filter(Boolean) || [];
+            for (const file of changedFiles.slice(0, 5)) {
+              try {
+                const content = fs.readFileSync(file, 'utf8');
+                changedCode += `\n--- ${file} ---\n${content.substring(0, 3000)}\n`;
+              } catch(e) {}
+            }
+
+            // --- Build AI prompt ---
+            const prompt = `You are a senior Java/Spring Boot code quality analyst. Analyze this CI pipeline data and provide actionable recommendations.
+
+            ## Project: Fintech Account Management Microservice (Spring Boot 3.2, Java 21)
+
+            ## Test Results
+            - Tests run: ${process.env.TESTS_RUN}, Failed: ${process.env.TESTS_FAILED}
+            - Line coverage: ${process.env.LINE_COVERAGE}%
+            - Lines covered: ${process.env.LINES_COVERED}, Lines missed: ${process.env.LINES_MISSED}
+
+            ## Classes with Low Coverage (<80%)
+            ${coverageBreakdown}
+
+            ## Static Analysis
+            - SpotBugs issues: ${process.env.SPOTBUGS_COUNT}
+            - PMD violations: ${process.env.PMD_COUNT}
+            - Code duplications: ${process.env.CPD_COUNT}
+
+            ## SpotBugs Findings (top 15)
+            ${spotbugsDetails}
+
+            ## PMD Findings (top 15)
+            ${pmdDetails}
+
+            ## Recently Changed Files
+            ${changedFiles.join('\n') || 'N/A'}
+
+            ${changedCode ? `## Changed Source Code (excerpts)\n${changedCode}` : ''}
+
+            Provide your analysis in this EXACT format:
+
+            ### 🏆 Quality Score: X/10
+
+            ### 📊 Coverage Analysis
+            (evaluate coverage gaps, suggest which classes/methods need more tests)
+
+            ### 🐛 Bug Risk Assessment
+            (analyze SpotBugs/PMD findings, rank by severity, highlight any security issues)
+
+            ### 🔒 Security Review
+            (check for SQL injection, sensitive data exposure, improper validation in a fintech context)
+
+            ### 🏗️ Architecture & Design
+            (evaluate patterns, coupling, SOLID principles based on changed code)
+
+            ### 📋 Top 5 Action Items
+            (prioritized, specific, actionable improvements)
+
+            Be concise, specific, and focus on fintech-relevant concerns (data integrity, transaction safety, input validation).`;
+
+            let aiAnalysis = '';
+            const apiKey = process.env.OPENAI_API_KEY;
+
+            if (apiKey) {
+              try {
+                const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                  },
+                  body: JSON.stringify({
+                    model: 'gpt-4o-mini',
+                    messages: [{ role: 'user', content: prompt }],
+                    max_tokens: 2000,
+                    temperature: 0.3
+                  })
+                });
+                const data = await response.json();
+                aiAnalysis = data.choices?.[0]?.message?.content || 'AI analysis unavailable';
+              } catch(e) {
+                aiAnalysis = `AI analysis failed: ${e.message}`;
+              }
+            } else {
+              aiAnalysis = '⚠️ `OPENAI_API_KEY` secret not configured — falling back to metrics-only summary.';
+            }
+
+            // --- Build final report ---
+            const report = `# 🤖 AI Code Quality Analysis
+
+            ## Pipeline Metrics
+            | Metric | Value |
+            |--------|-------|
+            | 🧪 Tests | ${process.env.TESTS_RUN} run, ${process.env.TESTS_FAILED} failed |
+            | 📈 Line Coverage | ${process.env.LINE_COVERAGE}% |
+            | 🐛 SpotBugs | ${process.env.SPOTBUGS_COUNT} issues |
+            | ⚡ PMD | ${process.env.PMD_COUNT} violations |
+            | 📋 Duplications | ${process.env.CPD_COUNT} blocks |
+
+            ---
+
+            ${aiAnalysis}
+
+            ---
+            *Generated by AI Code Quality Analysis • ${new Date().toISOString()}*`;
+
+            // Post as job summary
+            await core.summary.addRaw(report).write();
+
+            // Post as PR comment if applicable
+            if (context.payload.pull_request) {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number
+              });
+              const botComment = comments.find(c =>
+                c.body.includes('🤖 AI Code Quality Analysis') && c.user.type === 'Bot'
+              );
+              const body = report;
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  body
+                });
+              }
+            }
+
+      - name: Quality gate check
+        env:
+          LINE_COVERAGE: ${{ steps.metrics.outputs.line_coverage }}
+          TESTS_FAILED: ${{ steps.metrics.outputs.tests_failed }}
+          SPOTBUGS_COUNT: ${{ steps.metrics.outputs.spotbugs_count }}
+        run: |
+          echo "## 🚦 Quality Gate" >> $GITHUB_STEP_SUMMARY
+          PASS=true
+
+          if [ "$TESTS_FAILED" != "0" ]; then
+            echo "❌ **FAIL**: ${TESTS_FAILED} test(s) failed" >> $GITHUB_STEP_SUMMARY
+            PASS=false
+          fi
+
+          if [ "$LINE_COVERAGE" != "N/A" ] && [ "$LINE_COVERAGE" -lt 50 ]; then
+            echo "⚠️ **WARN**: Line coverage ${LINE_COVERAGE}% is below 50% threshold" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          CRITICAL_BUGS=$(grep -c 'priority="1"' static-analysis/spotbugs/spotbugsXml.xml 2>/dev/null || echo "0")
+          if [ "$CRITICAL_BUGS" -gt 0 ]; then
+            echo "⚠️ **WARN**: ${CRITICAL_BUGS} high-priority SpotBugs issue(s)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "$PASS" = true ]; then
+            echo "✅ **PASS**: All quality gates passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Quality gate failed" && exit 1
+          fi
+
+  # ─────────────────────────────────────────────────────────────
+  # AI Test Automation
+  # Analyzes test coverage, identifies gaps, generates AI-powered
+  # test suggestions, and validates test quality with mutation
+  # testing concepts.
+  # ─────────────────────────────────────────────────────────────
+  ai-test-automation:
+    name: AI Test Automation
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: always() && needs.build-and-test.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report/
+        continue-on-error: true
+
+      - name: Download test reports
+        uses: actions/download-artifact@v4
+        with:
+          name: test-reports
+          path: test-reports/
+        continue-on-error: true
+
+      - name: Analyze test coverage gaps
+        id: gaps
+        run: |
+          echo "## 🔍 Test Coverage Gap Analysis" >> $GITHUB_STEP_SUMMARY
+
+          JACOCO_CSV="coverage-report/jacoco.csv"
+          if [ ! -f "$JACOCO_CSV" ]; then
+            echo "No coverage data found" >> $GITHUB_STEP_SUMMARY
+            echo "gaps=none" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Find uncovered/low-coverage classes
+          echo "### Classes with coverage below 70%:" >> $GITHUB_STEP_SUMMARY
+          GAPS=""
+          while IFS=',' read -r group pkg class im ic bm bc lm lc cm cc mm mc; do
+            if [ "$group" != "GROUP" ]; then
+              TOTAL=$((lm + lc))
+              if [ "$TOTAL" -gt 0 ]; then
+                PCT=$(( (lc * 100) / TOTAL ))
+                if [ "$PCT" -lt 70 ]; then
+                  echo "- **${pkg}.${class}**: ${PCT}% line coverage (${lm} lines missed)" >> $GITHUB_STEP_SUMMARY
+                  GAPS="${GAPS}${pkg}.${class}:${PCT}%:${lm} missed\n"
+                fi
+              fi
+            fi
+          done < "$JACOCO_CSV"
+
+          if [ -z "$GAPS" ]; then
+            echo "✅ All classes have ≥70% line coverage!" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "gaps<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$GAPS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Method-level analysis from JaCoCo XML
+          JACOCO_XML="coverage-report/jacoco.xml"
+          if [ -f "$JACOCO_XML" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Uncovered methods:" >> $GITHUB_STEP_SUMMARY
+            grep -oP 'name="[^"]*"[^/]*INSTRUCTION[^/]*missed="[^0][^"]*"' "$JACOCO_XML" 2>/dev/null | head -20 | while read line; do
+              METHOD=$(echo "$line" | grep -oP 'name="\K[^"]+' | head -1)
+              MISSED=$(echo "$line" | grep -oP 'missed="\K[^"]+')
+              echo "- \`${METHOD}\`: ${MISSED} instructions uncovered" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+      - name: Analyze test quality
+        id: quality
+        run: |
+          echo "## 🧬 Test Quality Analysis" >> $GITHUB_STEP_SUMMARY
+
+          # Count test classes and methods
+          TEST_FILES=$(find src/test -name "*Test*.java" 2>/dev/null | wc -l)
+          TEST_METHODS=$(grep -r "@Test\|@RepeatedTest\|@ParameterizedTest" src/test/ 2>/dev/null | wc -l)
+          SRC_FILES=$(find src/main -name "*.java" 2>/dev/null | wc -l)
+
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Test files | ${TEST_FILES} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test methods | ${TEST_METHODS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source files | ${SRC_FILES} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test-to-source ratio | $(echo "scale=1; $TEST_FILES / $SRC_FILES" | bc 2>/dev/null || echo "N/A") |" >> $GITHUB_STEP_SUMMARY
+
+          echo "test_files=${TEST_FILES}" >> $GITHUB_OUTPUT
+          echo "test_methods=${TEST_METHODS}" >> $GITHUB_OUTPUT
+          echo "src_files=${SRC_FILES}" >> $GITHUB_OUTPUT
+
+          # Check for test anti-patterns
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Anti-Pattern Scan:" >> $GITHUB_STEP_SUMMARY
+
+          EMPTY_CATCH=$(grep -rn 'catch.*{[[:space:]]*}' src/test/ 2>/dev/null | wc -l)
+          NO_ASSERT=$(grep -rL 'assert\|verify\|expect\|andExpect' src/test/ 2>/dev/null | grep "Test.java" | wc -l)
+          THREAD_SLEEP=$(grep -rn 'Thread.sleep' src/test/ 2>/dev/null | wc -l)
+
+          [ "$EMPTY_CATCH" -gt 0 ] && echo "⚠️ ${EMPTY_CATCH} empty catch block(s) — tests may swallow failures" >> $GITHUB_STEP_SUMMARY
+          [ "$NO_ASSERT" -gt 0 ] && echo "⚠️ ${NO_ASSERT} test file(s) without assertions" >> $GITHUB_STEP_SUMMARY
+          [ "$THREAD_SLEEP" -gt 0 ] && echo "⚠️ ${THREAD_SLEEP} Thread.sleep() call(s) — flaky test risk" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$EMPTY_CATCH" -eq 0 ] && [ "$NO_ASSERT" -eq 0 ] && [ "$THREAD_SLEEP" -eq 0 ]; then
+            echo "✅ No common test anti-patterns detected" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "empty_catch=${EMPTY_CATCH}" >> $GITHUB_OUTPUT
+          echo "no_assert=${NO_ASSERT}" >> $GITHUB_OUTPUT
+
+          # Check assertion diversity
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Assertion Library Usage:" >> $GITHUB_STEP_SUMMARY
+          ASSERTJ=$(grep -r "assertThat\|isEqualTo\|hasSize\|contains" src/test/ 2>/dev/null | wc -l)
+          MOCKITO=$(grep -r "verify\|when\|mock\|@Mock" src/test/ 2>/dev/null | wc -l)
+          JUNIT=$(grep -r "assertEquals\|assertTrue\|assertThrows\|assertNotNull" src/test/ 2>/dev/null | wc -l)
+          MOCKMVC=$(grep -r "mockMvc\|MockMvc\|andExpect" src/test/ 2>/dev/null | wc -l)
+          echo "- AssertJ: ${ASSERTJ} usages" >> $GITHUB_STEP_SUMMARY
+          echo "- Mockito: ${MOCKITO} usages" >> $GITHUB_STEP_SUMMARY
+          echo "- JUnit assertions: ${JUNIT} usages" >> $GITHUB_STEP_SUMMARY
+          echo "- MockMvc: ${MOCKMVC} usages" >> $GITHUB_STEP_SUMMARY
+
+      - name: Identify untested source files
+        id: untested
+        run: |
+          echo "## 📁 Untested Source Files" >> $GITHUB_STEP_SUMMARY
+          UNTESTED=""
+          for src in $(find src/main -name "*.java" -printf "%f\n" | sed 's/.java//'); do
+            if ! find src/test -name "${src}Test.java" -o -name "${src}Tests.java" -o -name "${src}IT.java" 2>/dev/null | grep -q .; then
+              FULL_PATH=$(find src/main -name "${src}.java" | head -1)
+              echo "- \`${src}\` (${FULL_PATH})" >> $GITHUB_STEP_SUMMARY
+              UNTESTED="${UNTESTED}${src}\n"
+            fi
+          done
+          if [ -z "$UNTESTED" ]; then
+            echo "✅ All source files have corresponding test files" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "untested<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$UNTESTED" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: AI Test Suggestions
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          COVERAGE_GAPS: ${{ steps.gaps.outputs.gaps }}
+          UNTESTED_FILES: ${{ steps.untested.outputs.untested }}
+          TEST_FILES: ${{ steps.quality.outputs.test_files }}
+          TEST_METHODS: ${{ steps.quality.outputs.test_methods }}
+          SRC_FILES: ${{ steps.quality.outputs.src_files }}
+          EMPTY_CATCH: ${{ steps.quality.outputs.empty_catch }}
+          NO_ASSERT: ${{ steps.quality.outputs.no_assert }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            // --- Read existing test files ---
+            const glob = require('path');
+            let existingTests = '';
+            const testDir = 'src/test/java/com/fintech/account';
+            const readDir = (dir) => {
+              try {
+                const items = fs.readdirSync(dir, { withFileTypes: true });
+                for (const item of items) {
+                  const path = `${dir}/${item.name}`;
+                  if (item.isDirectory()) readDir(path);
+                  else if (item.name.endsWith('Test.java')) {
+                    const content = fs.readFileSync(path, 'utf8');
+                    existingTests += `\n--- ${item.name} ---\n${content.substring(0, 2000)}\n`;
+                  }
+                }
+              } catch(e) {}
+            };
+            readDir(testDir);
+
+            // --- Read low-coverage source files ---
+            let sourceCode = '';
+            const untestedFiles = (process.env.UNTESTED_FILES || '').split('\n').filter(Boolean);
+            for (const name of untestedFiles.slice(0, 5)) {
+              try {
+                const files = require('child_process')
+                  .execSync(`find src/main -name "${name}.java"`)
+                  .toString().trim().split('\n');
+                for (const file of files) {
+                  if (file) {
+                    const content = fs.readFileSync(file, 'utf8');
+                    sourceCode += `\n--- ${file} ---\n${content.substring(0, 3000)}\n`;
+                  }
+                }
+              } catch(e) {}
+            }
+
+            // --- AI Prompt ---
+            const prompt = `You are a senior Java test automation engineer specializing in Spring Boot fintech applications.
+
+            ## Context
+            - Project: Fintech Account Management Microservice (Spring Boot 3.2, Java 21)
+            - Test framework: JUnit 5 + Mockito + AssertJ + Spring MockMvc
+            - Current: ${process.env.TEST_FILES} test files, ${process.env.TEST_METHODS} test methods, ${process.env.SRC_FILES} source files
+
+            ## Coverage Gaps
+            ${process.env.COVERAGE_GAPS || 'None identified'}
+
+            ## Untested Files
+            ${process.env.UNTESTED_FILES || 'All files have tests'}
+
+            ## Test Anti-Patterns Found
+            - Empty catch blocks: ${process.env.EMPTY_CATCH}
+            - Test files without assertions: ${process.env.NO_ASSERT}
+
+            ## Existing Tests (excerpts)
+            ${existingTests.substring(0, 4000)}
+
+            ## Untested Source Code
+            ${sourceCode.substring(0, 4000)}
+
+            Provide your analysis in EXACTLY this format:
+
+            ### 🧪 Test Coverage Assessment
+            (evaluate current test strategy, identify critical untested paths)
+
+            ### 🎯 Missing Test Scenarios
+            For each gap, provide:
+            1. **What to test**: specific method/scenario
+            2. **Why it matters**: fintech risk (data integrity, money handling, etc.)
+            3. **Test code snippet**: complete JUnit 5 test method
+
+            Focus on:
+            - Edge cases in financial calculations (BigDecimal precision, zero amounts, negative)
+            - Transaction atomicity and concurrent access scenarios
+            - Input validation boundary testing
+            - Exception handling paths
+            - Security-relevant test cases (unauthorized access, injection)
+
+            ### 🔄 Mutation Testing Recommendations
+            (suggest areas where mutation testing would reveal weak assertions)
+
+            ### 📈 Test Improvement Roadmap
+            (prioritized list of 5 test improvements, ordered by risk reduction)
+
+            Be specific to THIS codebase. Generate real, compilable test code.`;
+
+            let aiSuggestions = '';
+            const apiKey = process.env.OPENAI_API_KEY;
+
+            if (apiKey) {
+              try {
+                const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                  },
+                  body: JSON.stringify({
+                    model: 'gpt-4o-mini',
+                    messages: [{ role: 'user', content: prompt }],
+                    max_tokens: 3000,
+                    temperature: 0.3
+                  })
+                });
+                const data = await response.json();
+                aiSuggestions = data.choices?.[0]?.message?.content || 'AI suggestions unavailable';
+              } catch(e) {
+                aiSuggestions = `AI suggestions failed: ${e.message}`;
+              }
+            } else {
+              aiSuggestions = '⚠️ `OPENAI_API_KEY` secret not configured — add it to unlock AI-powered test suggestions.';
+            }
+
+            // --- Build report ---
+            const report = `# 🤖 AI Test Automation Report
+
+            ## Test Suite Health
+            | Metric | Value |
+            |--------|-------|
+            | Test Files | ${process.env.TEST_FILES} |
+            | Test Methods | ${process.env.TEST_METHODS} |
+            | Source Files | ${process.env.SRC_FILES} |
+            | Anti-Patterns | ${parseInt(process.env.EMPTY_CATCH) + parseInt(process.env.NO_ASSERT)} found |
+
+            ---
+
+            ${aiSuggestions}
+
+            ---
+            *Generated by AI Test Automation • ${new Date().toISOString()}*`;
+
+            await core.summary.addRaw(report).write();
+
+            // Post as PR comment
+            if (context.payload.pull_request) {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number
+              });
+              const botComment = comments.find(c =>
+                c.body.includes('🤖 AI Test Automation Report') && c.user.type === 'Bot'
+              );
+              const body = report;
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  comment_id: botComment.id, body
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number, body
+                });
+              }
+            }
+
   docker-push:
     name: Build & Push to ACR
     runs-on: ubuntu-latest
-    needs: [ build-and-test, code-quality, trivy-scan, trivy-docker-scan ]
+    needs: [ build-and-test, code-quality, trivy-scan, trivy-docker-scan, ai-code-quality, ai-test-automation ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
