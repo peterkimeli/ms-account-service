@@ -41,6 +41,7 @@ jobs:
         with:
           name: test-reports
           path: target/surefire-reports/
+          if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload build artifact
