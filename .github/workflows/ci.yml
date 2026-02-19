@@ -121,7 +121,7 @@ jobs:
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: code-quality
 
     steps:
       - name: Checkout code
@@ -163,7 +163,7 @@ jobs:
   trivy-docker-scan:
     name: Trivy Docker Image Scan
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: code-quality
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
@@ -216,8 +216,8 @@ jobs:
   ai-code-quality:
     name: AI Code Quality Analysis
     runs-on: ubuntu-latest
-    needs: build-and-test
-    if: always() && needs.build-and-test.result == 'success'
+    needs: trivy-scan
+    if: always() && !cancelled() && !failure()
 
     steps:
       - name: Checkout code
@@ -286,7 +286,7 @@ jobs:
           # --- SpotBugs parsing ---
           SPOTBUGS_XML="static-analysis/spotbugs/spotbugsXml.xml"
           if [ -f "$SPOTBUGS_XML" ]; then
-            BUG_COUNT=$(grep -c '<BugInstance' "$SPOTBUGS_XML" 2>/dev/null || echo "0")
+            BUG_COUNT=$(grep -c '<BugInstance' "$SPOTBUGS_XML" 2>/dev/null) || BUG_COUNT=0
             echo "spotbugs_count=${BUG_COUNT}" >> $GITHUB_OUTPUT
             echo "🐛 SpotBugs issues: **${BUG_COUNT}**" >> $GITHUB_STEP_SUMMARY
           else
@@ -297,7 +297,7 @@ jobs:
           # --- PMD parsing ---
           PMD_XML="static-analysis/pmd.xml"
           if [ -f "$PMD_XML" ]; then
-            PMD_COUNT=$(grep -c '<violation' "$PMD_XML" 2>/dev/null || echo "0")
+            PMD_COUNT=$(grep -c '<violation' "$PMD_XML" 2>/dev/null) || PMD_COUNT=0
             echo "pmd_count=${PMD_COUNT}" >> $GITHUB_OUTPUT
             echo "⚡ PMD violations: **${PMD_COUNT}**" >> $GITHUB_STEP_SUMMARY
           else
@@ -308,7 +308,7 @@ jobs:
           # --- CPD (copy-paste detection) ---
           CPD_XML="static-analysis/cpd.xml"
           if [ -f "$CPD_XML" ]; then
-            CPD_COUNT=$(grep -c '<duplication' "$CPD_XML" 2>/dev/null || echo "0")
+            CPD_COUNT=$(grep -c '<duplication' "$CPD_XML" 2>/dev/null) || CPD_COUNT=0
             echo "cpd_count=${CPD_COUNT}" >> $GITHUB_OUTPUT
             echo "📋 Code duplications: **${CPD_COUNT}**" >> $GITHUB_STEP_SUMMARY
           else
@@ -562,7 +562,7 @@ jobs:
             echo "⚠️ **WARN**: Line coverage ${LINE_COVERAGE}% is below 50% threshold" >> $GITHUB_STEP_SUMMARY
           fi
 
-          CRITICAL_BUGS=$(grep -c 'priority="1"' static-analysis/spotbugs/spotbugsXml.xml 2>/dev/null || echo "0")
+          CRITICAL_BUGS=$(grep -c 'priority="1"' static-analysis/spotbugs/spotbugsXml.xml 2>/dev/null) || CRITICAL_BUGS=0
           if [ "$CRITICAL_BUGS" -gt 0 ]; then
             echo "⚠️ **WARN**: ${CRITICAL_BUGS} high-priority SpotBugs issue(s)" >> $GITHUB_STEP_SUMMARY
           fi
@@ -582,8 +582,8 @@ jobs:
   ai-test-automation:
     name: AI Test Automation
     runs-on: ubuntu-latest
-    needs: build-and-test
-    if: always() && needs.build-and-test.result == 'success'
+    needs: trivy-scan
+    if: always() && !cancelled() && !failure()
 
     steps:
       - name: Checkout code
@@ -747,7 +747,6 @@ jobs:
             const fs = require('fs');
 
             // --- Read existing test files ---
-            const glob = require('path');
             let existingTests = '';
             const testDir = 'src/test/java/com/fintech/account';
             const readDir = (dir) => {
