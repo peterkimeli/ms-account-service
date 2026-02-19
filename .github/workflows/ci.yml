@@ -853,8 +853,8 @@ jobs:
               }
             }
 
-  docker-push:
-    name: Build, Scan & Push to ACR
+  docker-build:
+    name: Docker Build
     runs-on: ubuntu-latest
     needs: [ ai-code-quality, ai-test-automation ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -883,6 +883,40 @@ jobs:
       - name: Build Docker image
         run: docker build -t account-service:${{ github.sha }} .
 
+      - name: Save Docker image
+        run: docker save account-service:${{ github.sha }} -o docker-image.tar
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: docker-image.tar
+          retention-days: 1
+
+      - name: Save version output
+        run: echo "${{ steps.version.outputs.VERSION }}" > version.txt
+
+      - name: Upload version artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-info
+          path: version.txt
+          retention-days: 1
+
+  trivy-image-scan:
+    name: Trivy Docker Image Scan
+    runs-on: ubuntu-latest
+    needs: docker-build
+
+    steps:
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load -i docker-image.tar
+
       - name: Trivy Docker image scan
         uses: aquasecurity/trivy-action@0.28.0
         with:
@@ -905,6 +939,29 @@ jobs:
         continue-on-error: true
         with:
           sarif_file: 'trivy-image-results.sarif'
+
+  docker-push:
+    name: Push to ACR
+    runs-on: ubuntu-latest
+    needs: trivy-image-scan
+
+    steps:
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Download version info
+        uses: actions/download-artifact@v4
+        with:
+          name: version-info
+
+      - name: Load Docker image
+        run: docker load -i docker-image.tar
+
+      - name: Read version
+        id: version
+        run: echo "VERSION=$(cat version.txt)" >> $GITHUB_OUTPUT
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
