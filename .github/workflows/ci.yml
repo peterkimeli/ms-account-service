@@ -970,7 +970,7 @@ jobs:
       - name: Login to ACR
         run: az acr login --name ${{ vars.ACR_NAME }}
 
-      - name: Tag and push Docker image
+      - name: x
         run: |
           docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
           docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}
