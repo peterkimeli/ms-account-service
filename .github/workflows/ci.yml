@@ -121,7 +121,7 @@ jobs:
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: code-quality
 
     steps:
       - name: Checkout code
@@ -169,7 +169,7 @@ jobs:
   ai-code-quality:
     name: AI Code Quality Analysis
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: trivy-scan
 
     steps:
       - name: Checkout code
@@ -534,7 +534,7 @@ jobs:
   ai-test-automation:
     name: AI Test Automation
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: trivy-scan
 
     steps:
       - name: Checkout code
@@ -856,7 +856,7 @@ jobs:
   docker-push:
     name: Build, Scan & Push to ACR
     runs-on: ubuntu-latest
-    needs: [ build-and-test, code-quality, trivy-scan, ai-code-quality, ai-test-automation ]
+    needs: [ ai-code-quality, ai-test-automation ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
