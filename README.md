@@ -240,3 +240,6 @@ Peter Kimeli - [@peterkimeli](https://github.com/peterkimeli)
 
 Project Link: [https://github.com/peterkimeli/ms-account-service](https://github.com/peterkimeli/ms-account-service)
 ```
+
+Build & Test → Code Quality → Trivy FS Scan → ┬─ AI Code Quality   ─┬→ Docker Build → Trivy Image Scan → Push to ACR
+                                               └─ AI Test Automation ┘

@@ -102,20 +102,23 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Check code style (Checkstyle via Maven)
+      - name: Run SpotBugs analysis
+        run: mvn spotbugs:check -B
         continue-on-error: true
-        run: mvn checkstyle:check -B
 
-      - name: OWASP Dependency Check
+      - name: Run PMD analysis
+        run: mvn pmd:check cpd:check -B
         continue-on-error: true
-        run: mvn org.owasp:dependency-check-maven:check -B -DfailBuildOnCVSS=9
 
-      - name: Upload dependency check report
+      - name: Upload code quality reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dependency-check-report
-          path: target/dependency-check-report.html
+          name: code-quality-reports
+          path: |
+            target/spotbugs/
+            target/pmd*
+            target/cpd*
           retention-days: 7
 
   trivy-scan:
