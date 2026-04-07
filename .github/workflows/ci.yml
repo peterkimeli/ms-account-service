@@ -22,7 +22,7 @@ concurrency:
 jobs:
   build-and-test:
     name: Build & Test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Checkout code
@@ -88,7 +88,7 @@ jobs:
 
   code-quality:
     name: Code Quality
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: build-and-test
 
     steps:
@@ -123,7 +123,7 @@ jobs:
 
   trivy-scan:
     name: Trivy Security Scan
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: code-quality
 
     steps:
@@ -171,7 +171,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   ai-code-quality:
     name: AI Code Quality Analysis
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: trivy-scan
 
     steps:
@@ -533,7 +533,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   ai-test-automation:
     name: AI Test Automation
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: trivy-scan
 
     steps:
@@ -852,7 +852,7 @@ jobs:
 
   docker-build:
     name: Docker Build
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [ ai-code-quality, ai-test-automation ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
@@ -902,7 +902,7 @@ jobs:
 
   trivy-image-scan:
     name: Trivy Docker Image Scan
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: docker-build
 
     steps:
@@ -939,7 +939,7 @@ jobs:
 
   docker-push:
     name: Push to ACR
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: trivy-image-scan
 
     steps:
@@ -970,7 +970,7 @@ jobs:
       - name: Login to ACR
         run: az acr login --name ${{ vars.ACR_NAME }}
 
-      - name: x
+      - name: Tag and push to ACR
         run: |
           docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
           docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}
@@ -978,3 +978,65 @@ jobs:
           docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
           docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}
           docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:latest
+
+  # ─────────────────────────────────────────────────────────────
+  # GitOps - Update Kubernetes Manifests
+  # After a successful image push, commit the new image tag to the
+  # GitOps repository so ArgoCD/Flux can sync it to the cluster.
+  # Required vars:  GITOPS_REPO (e.g. your-org/k8s-infra)
+  #                 GITOPS_MANIFEST_PATH (e.g. apps/ms-account-service)
+  # Required secret: GITOPS_TOKEN (PAT with contents:write on GitOps repo)
+  # ─────────────────────────────────────────────────────────────
+  gitops-update:
+    name: GitOps - Update Manifests
+    runs-on: self-hosted
+    needs: docker-push
+
+    steps:
+      - name: Download version info
+        uses: actions/download-artifact@v4
+        with:
+          name: version-info
+
+      - name: Read version
+        id: version
+        run: echo "VERSION=$(cat version.txt)" >> $GITHUB_OUTPUT
+
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Update image tag
+        env:
+          NEW_IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
+          MANIFEST_PATH: ${{ vars.GITOPS_MANIFEST_PATH }}
+        run: |
+          cd gitops
+
+          # ── Kustomize (preferred) ────────────────────────────────────
+          if command -v kustomize &>/dev/null && [ -f "${MANIFEST_PATH}/kustomization.yaml" ]; then
+            cd "${MANIFEST_PATH}"
+            kustomize edit set image ms-account-service="${NEW_IMAGE}"
+            cd -
+
+          # ── Plain YAML / Helm values fallback ───────────────────────
+          else
+            find "${MANIFEST_PATH}" \( -name "*.yaml" -o -name "*.yml" \) | xargs \
+              sed -i "s|image: ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:.*|image: ${NEW_IMAGE}|g"
+          fi
+
+      - name: Commit and push manifest update
+        run: |
+          cd gitops
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --cached --quiet && echo "No manifest changes to commit" && exit 0
+          git commit -m "chore(ms-account-service): bump image to ${{ steps.version.outputs.VERSION }}
+
+          Commit: ${{ github.sha }}
+          Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git push
