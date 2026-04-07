@@ -65,7 +65,7 @@ jobs:
           name: test-reports
           path: target/surefire-reports/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
 
       - name: Upload coverage report
         if: always()
@@ -74,7 +74,7 @@ jobs:
           name: coverage-report
           path: target/site/jacoco/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
 
       - name: Upload static analysis reports
         if: always()
@@ -86,14 +86,14 @@ jobs:
             target/pmd.xml
             target/cpd.xml
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-jar
           path: target/*.jar
-          retention-days: 7
+          retention-days: 1
 
   code-quality:
     name: Code Quality
@@ -136,7 +136,7 @@ jobs:
             target/spotbugs/
             target/pmd*
             target/cpd*
-          retention-days: 7
+          retention-days: 1
 
   trivy-scan:
     name: Trivy Security Scan
@@ -171,7 +171,7 @@ jobs:
         with:
           name: trivy-fs-sarif
           path: trivy-fs-results.sarif
-          retention-days: 7
+          retention-days: 1
 
       - name: Upload Trivy scan results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
