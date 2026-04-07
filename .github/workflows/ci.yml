@@ -39,8 +39,9 @@ jobs:
       - name: Install Maven
         run: |
           if ! command -v mvn &>/dev/null; then
-            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C /opt
-            echo "/opt/apache-maven-3.9.6/bin" >> $GITHUB_PATH
+            mkdir -p "$HOME/maven"
+            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C "$HOME/maven"
+            echo "$HOME/maven/apache-maven-3.9.6/bin" >> $GITHUB_PATH
           fi
 
       - name: Build & Test with Coverage
@@ -114,8 +115,9 @@ jobs:
       - name: Install Maven
         run: |
           if ! command -v mvn &>/dev/null; then
-            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C /opt
-            echo "/opt/apache-maven-3.9.6/bin" >> $GITHUB_PATH
+            mkdir -p "$HOME/maven"
+            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C "$HOME/maven"
+            echo "$HOME/maven/apache-maven-3.9.6/bin" >> $GITHUB_PATH
           fi
       - name: Run SpotBugs analysis
         run: mvn spotbugs:check -B
@@ -206,8 +208,9 @@ jobs:
       - name: Install Maven
         run: |
           if ! command -v mvn &>/dev/null; then
-            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C /opt
-            echo "/opt/apache-maven-3.9.6/bin" >> $GITHUB_PATH
+            mkdir -p "$HOME/maven"
+            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C "$HOME/maven"
+            echo "$HOME/maven/apache-maven-3.9.6/bin" >> $GITHUB_PATH
           fi
       - name: Download coverage report
         uses: actions/download-artifact@v4
@@ -575,8 +578,9 @@ jobs:
       - name: Install Maven
         run: |
           if ! command -v mvn &>/dev/null; then
-            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C /opt
-            echo "/opt/apache-maven-3.9.6/bin" >> $GITHUB_PATH
+            mkdir -p "$HOME/maven"
+            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C "$HOME/maven"
+            echo "$HOME/maven/apache-maven-3.9.6/bin" >> $GITHUB_PATH
           fi
       - name: Download coverage report
         uses: actions/download-artifact@v4
@@ -900,8 +904,9 @@ jobs:
       - name: Install Maven
         run: |
           if ! command -v mvn &>/dev/null; then
-            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C /opt
-            echo "/opt/apache-maven-3.9.6/bin" >> $GITHUB_PATH
+            mkdir -p "$HOME/maven"
+            curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz | tar -xz -C "$HOME/maven"
+            echo "$HOME/maven/apache-maven-3.9.6/bin" >> $GITHUB_PATH
           fi
       - name: Extract version from pom.xml
         id: version
