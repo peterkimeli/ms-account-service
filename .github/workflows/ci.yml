@@ -1052,21 +1052,25 @@ jobs:
 
       - name: Update image tag
         env:
-          NEW_IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
           MANIFEST_PATH: ${{ vars.GITOPS_MANIFEST_PATH }}
         run: |
           cd gitops
 
-          # ── Kustomize (preferred) ────────────────────────────────────
+          # ── Kustomize ───────────────────────────────────────────────
           if command -v kustomize &>/dev/null && [ -f "${MANIFEST_PATH}/kustomization.yaml" ]; then
             cd "${MANIFEST_PATH}"
-            kustomize edit set image ms-account-service="${NEW_IMAGE}"
+            kustomize edit set image "ms-account-service=${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${VERSION}"
             cd -
 
-          # ── Plain YAML / Helm values fallback ───────────────────────
+          # ── Helm values (values-dev.yaml) ───────────────────────────
+          elif [ -f "${MANIFEST_PATH}/values-dev.yaml" ]; then
+            sed -i "s|^\(\s*tag:\s*\).*|\1\"${VERSION}\"|" "${MANIFEST_PATH}/values-dev.yaml"
+
+          # ── Plain YAML fallback ─────────────────────────────────────
           else
             find "${MANIFEST_PATH}" \( -name "*.yaml" -o -name "*.yml" \) | xargs \
-              sed -i "s|image: ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:.*|image: ${NEW_IMAGE}|g"
+              sed -i "s|image: ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:.*|image: ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${VERSION}|g"
           fi
 
       - name: Commit and push manifest update
