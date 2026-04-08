@@ -890,7 +890,7 @@ jobs:
             }
 
   docker-build:
-    name: Docker Build
+    name: Docker Build & Push
     runs-on: self-hosted
     needs: [ ai-code-quality, ai-test-automation ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -929,41 +929,6 @@ jobs:
       - name: Build Docker image
         run: docker build -t account-service:${{ github.sha }} .
 
-  trivy-image-scan:
-    name: Trivy Docker Image Scan
-    runs-on: self-hosted
-    needs: docker-build
-
-    steps:
-      - name: Trivy Docker image scan
-        uses: aquasecurity/trivy-action@v0.35.0
-        with:
-          image-ref: 'account-service:${{ github.sha }}'
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-
-      - name: Trivy Docker image scan (SARIF)
-        uses: aquasecurity/trivy-action@v0.35.0
-        with:
-          image-ref: 'account-service:${{ github.sha }}'
-          format: 'sarif'
-          output: 'trivy-image-results.sarif'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Upload Trivy image scan to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        continue-on-error: true
-        with:
-          sarif_file: 'trivy-image-results.sarif'
-
-  docker-push:
-    name: Push to ACR
-    runs-on: self-hosted
-    needs: [ trivy-image-scan, docker-build ]
-
-    steps:
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -976,12 +941,51 @@ jobs:
 
       - name: Tag and push to ACR
         run: |
-          docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ needs.docker-build.outputs.version }}
+          docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
           docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}
           docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:latest
-          docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ needs.docker-build.outputs.version }}
+          docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
           docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}
           docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:latest
+
+  trivy-image-scan:
+    name: Trivy Docker Image Scan
+    runs-on: self-hosted
+    needs: docker-build
+
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ vars.ACR_NAME }}
+
+      - name: Trivy Docker image scan
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: '${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Trivy Docker image scan (SARIF)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: '${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy image scan to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: 'trivy-image-results.sarif'
 
   # ─────────────────────────────────────────────────────────────
   # GitOps - Update Kubernetes Manifests
@@ -994,7 +998,7 @@ jobs:
   gitops-update:
     name: GitOps - Update Manifests
     runs-on: self-hosted
-    needs: [ docker-push, docker-build ]
+    needs: [ trivy-image-scan, docker-build ]
 
     steps:
       - name: Checkout GitOps repository
