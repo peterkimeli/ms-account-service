@@ -894,6 +894,8 @@ jobs:
     runs-on: self-hosted
     needs: [ ai-code-quality, ai-test-automation ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
 
     steps:
       - name: Checkout code
@@ -927,40 +929,12 @@ jobs:
       - name: Build Docker image
         run: docker build -t account-service:${{ github.sha }} .
 
-      - name: Save Docker image
-        run: docker save account-service:${{ github.sha }} -o docker-image.tar
-
-      - name: Upload Docker image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image
-          path: docker-image.tar
-          retention-days: 1
-
-      - name: Save version output
-        run: echo "${{ steps.version.outputs.VERSION }}" > version.txt
-
-      - name: Upload version artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: version-info
-          path: version.txt
-          retention-days: 1
-
   trivy-image-scan:
     name: Trivy Docker Image Scan
     runs-on: self-hosted
     needs: docker-build
 
     steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-
-      - name: Load Docker image
-        run: docker load -i docker-image.tar
-
       - name: Trivy Docker image scan
         uses: aquasecurity/trivy-action@v0.35.0
         with:
@@ -987,26 +961,9 @@ jobs:
   docker-push:
     name: Push to ACR
     runs-on: self-hosted
-    needs: trivy-image-scan
+    needs: [ trivy-image-scan, docker-build ]
 
     steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-
-      - name: Download version info
-        uses: actions/download-artifact@v4
-        with:
-          name: version-info
-
-      - name: Load Docker image
-        run: docker load -i docker-image.tar
-
-      - name: Read version
-        id: version
-        run: echo "VERSION=$(cat version.txt)" >> $GITHUB_OUTPUT
-
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -1019,10 +976,10 @@ jobs:
 
       - name: Tag and push to ACR
         run: |
-          docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
+          docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ needs.docker-build.outputs.version }}
           docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}
           docker tag account-service:${{ github.sha }} ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:latest
-          docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ steps.version.outputs.VERSION }}
+          docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ needs.docker-build.outputs.version }}
           docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:${{ github.sha }}
           docker push ${{ vars.ACR_LOGIN_SERVER }}/ms-account-service:latest
 
@@ -1037,18 +994,9 @@ jobs:
   gitops-update:
     name: GitOps - Update Manifests
     runs-on: self-hosted
-    needs: docker-push
+    needs: [ docker-push, docker-build ]
 
     steps:
-      - name: Download version info
-        uses: actions/download-artifact@v4
-        with:
-          name: version-info
-
-      - name: Read version
-        id: version
-        run: echo "VERSION=$(cat version.txt)" >> $GITHUB_OUTPUT
-
       - name: Checkout GitOps repository
         uses: actions/checkout@v4
         with:
@@ -1058,7 +1006,7 @@ jobs:
 
       - name: Update image tag
         env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
+          VERSION: ${{ needs.docker-build.outputs.version }}
           MANIFEST_PATH: ${{ vars.GITOPS_MANIFEST_PATH }}
         run: |
           cd gitops
@@ -1086,7 +1034,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
           git diff --cached --quiet && echo "No manifest changes to commit" && exit 0
-          git commit -m "chore(ms-account-service): bump image to ${{ steps.version.outputs.VERSION }}
+          git commit -m "chore(ms-account-service): bump image to ${{ needs.docker-build.outputs.version }}
 
           Commit: ${{ github.sha }}
           Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
